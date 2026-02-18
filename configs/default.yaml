@@ -1,0 +1,104 @@
+# ─── fedLLM default configuration ───
+# FRED-MD is the sole numerical data source.
+
+data:
+  root_path: ./data/raw
+  features: M           # multivariate → multivariate
+  target: INDPRO        # primary target: Industrial Production Index
+  freq: m               # monthly
+  scale: true
+
+  # DEC-003: 29 core variables selected via multi-criteria review
+  # (Fed communications, macro forecasting lit, nowcasting lit, NBER indicators)
+  # See discussions/002_fred_md_variable_selection.md for full rationale.
+  core_variables:
+    real_economy:        # 実体経済・生産 (5)
+      - INDPRO              # Industrial Production Index
+      - DPCERA3M086SBEA     # Real Personal Consumption Expenditures
+      - CUMFNS              # Capacity Utilization: Manufacturing
+      - W875RX1             # Real Personal Income ex Transfers
+      - CMRMTSPLx           # Real Mfg & Trade Industries Sales
+    labor:               # 労働市場 (6)
+      - PAYEMS              # Total Nonfarm Payrolls
+      - UNRATE              # Unemployment Rate
+      - CES0600000007       # Avg Hourly Earnings (Goods)
+      - CLAIMSx             # Initial Unemployment Claims
+      - CLF16OV             # Civilian Labor Force
+      - AWHMAN              # Avg Weekly Hours: Manufacturing
+    prices:              # 物価 (6)
+      - CPIAUCSL            # CPI All Items
+      - CPIULFSL            # CPI Less Food & Energy
+      - PCEPI               # PCE Price Index
+      - OILPRICEx           # Crude Oil Prices (WTI)
+      - DSERRG3M086SBEA     # PCE Services Price Index
+      - WPSFD49207          # PPI: Finished Goods
+    housing:             # 住宅 (2)
+      - HOUST               # Housing Starts
+      - PERMIT              # Building Permits
+    investment:          # 設備投資・在庫 (2)
+      - ANDENOx             # New Orders: Nondefense Cap Goods ex Aircraft
+      - ISRATIOx            # Total Business: Inventories/Sales Ratio
+    financial:           # 金融環境 (4)
+      - FEDFUNDS            # Federal Funds Rate
+      - GS10                # 10-Year Treasury Rate
+      - BAA                 # Moody's Baa Corporate Bond Yield
+      - S&P 500             # S&P 500 Index
+    exchange:            # 為替 (1)
+      - TWEXAFEGSMTHx       # Trade-Weighted USD Index
+    money_credit:        # マネー・信用 (2)
+      - M2SL                # M2 Money Stock
+      - BUSLOANS            # Commercial & Industrial Loans
+    sentiment:           # センチメント (1)
+      - UMCSENTx            # U. Michigan Consumer Sentiment
+
+  # Fallback mapping for series with early data gaps
+  fallback_variables:
+    ANDENOx: AMDMNOx     # Durable Goods New Orders (broader)
+
+model:
+  name: FedTimeLLM
+  llm_model: GPT2       # GPT2 for quick experiments; LLAMA for final runs
+  llm_layers: 6
+  llm_dim: 768           # GPT2: 768, LLaMA-7B: 4096
+
+  seq_len: 36            # 3 years lookback
+  label_len: 12          # 1 year label
+  pred_len: 12           # 1 year ahead forecast
+  patch_len: 6           # 6-month patches
+  stride: 3              # 3-month stride → overlapping patches
+
+  d_model: 16
+  d_ff: 32
+  n_heads: 8
+  num_tokens: 1000
+  dropout: 0.1
+
+training:
+  seed: 42
+  epochs: 50
+  batch_size: 32
+  learning_rate: 0.001
+  patience: 10           # early stopping patience
+  lr_scheduler: cosine   # cosine | onecycle
+  use_amp: true
+
+evaluation:
+  pred_horizons:
+    - 1
+    - 3
+    - 6
+    - 12
+  target_variables:
+    - INDPRO
+    - CPIAUCSL
+    - UNRATE
+    - PAYEMS
+    - PCEPI
+    - FEDFUNDS
+
+fomc:
+  statements_dir: ./data/raw/fomc/statements
+  minutes_dir: ./data/raw/fomc/minutes
+  vocabulary_dir: ./data/vocabulary
+  start_year: 1994       # FOMC statements publicly released from 1994
+  min_year_minutes: 1993 # minutes available slightly earlier

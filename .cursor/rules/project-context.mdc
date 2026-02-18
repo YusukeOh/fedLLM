@@ -1,0 +1,38 @@
+---
+description: fedLLMプロジェクトの現在の状態・確定済み設計判断・進行中の議論
+alwaysApply: true
+---
+
+# fedLLM プロジェクトコンテキスト
+
+## プロジェクト概要
+
+Time-LLM（Jin et al., 2024, ICLR）をベースに、FRBのドメイン知識（FOMC声明文・議事録の語彙）を組み込んだマクロ経済予測モデルを構築する。RQ1: Fedの景気判断は予測精度を向上させるか、RQ2: Fed語彙でExplainable AIを構築できるか。
+
+## 現在のフェーズ
+
+フェーズ0（環境構築・Time-LLM再現）完了。**フェーズ1（データ収集・前処理）に着手中。**
+- FRED-MD 29変数パイプライン整備済み（configs/default.yaml, src/data/fred_md.py）
+- **前処理パイプライン設計確定**: 始期1978-02、変換前線形補間、Winsorization（10×IQR）、[UNPUB]トークン方式（→ discussions/003_preprocessing_pipeline.md）
+- **CES変数差替え**: CES0600000007（週労働時間、重複）→ CES0600000008（時間当たり賃金）
+- FOMC文書収集基盤構築済み（src/data/fomc.py）
+- Fed語彙抽出基盤構築済み（src/data/fed_vocabulary.py）
+- 時間軸アライメント構築済み（src/data/temporal_alignment.py）
+- **PaP再設計確定**: Domain-Anchored PaP（変数名＋経済的役割＋変換意味）。統計ベースPaPを置換。時期情報は除外（look-ahead対策）（→ discussions/004_pap_design_and_lookahead.md）
+- **Look-ahead対策確定**: LLM内在的look-aheadを4手法で定量化。提案書・実装計画に反映済み
+- 次のアクション: 29変数プロンプト辞書の定義 → configs/default.yaml・src/data/fred_md.py への前処理設定反映 → FOMC文書の実収集 → Fed語彙辞書構築
+
+## 確定・暫定の設計判断（詳細は discussions/decisions.md）
+
+- **バックボーンLLM** [tentative]: 本実験はLLaMA-3.1-8B（128k語彙）。再現実験はLLaMA-7B、デバッグはGPT-2（→ discussions/001_backbone_llm_selection.md）
+- **変数選択** [confirmed]: FRED-MDコア29変数（9カテゴリ）。CES0600000008に差替え済み（→ discussions/002_fred_md_variable_selection.md）
+- **前処理パイプライン** [confirmed]: 始期1978-02、変換前線形補間、tcode変換、Winsorization（10×IQR）、StandardScaler（→ discussions/003_preprocessing_pipeline.md）
+- **[UNPUB]トークン** [tentative]: 末尾jagged edgesを学習可能な埋込みで処理。PaPでは伝達しない（埋込みで十分）（→ discussions/003_preprocessing_pipeline.md）
+- **PaP設計** [confirmed]: Domain-Anchored PaP（変数名＋経済的役割＋変換意味）。統計・時期は除外（→ discussions/004_pap_design_and_lookahead.md）
+- **Look-ahead対策** [confirmed]: 時間的シャッフル検定、LLM打ち切り日テスト、GPT-2バックボーン検証、Fedモデル仮想データ検証の4手法（→ discussions/004_pap_design_and_lookahead.md）
+- **LLMパラメータ**: 凍結。学習対象はReprogramming層とプロンプト関連のみ
+- **データ**: FRED-MD（唯一の数値データソース）＋FOMC声明文・議事録
+
+## 議論の管理
+
+このプロジェクトでは、設計判断の議論を `discussions/` に蓄積している。新しいセッションを開始する際は、まず `discussions/decisions.md` を確認して最新の方針を把握すること。議論が発生した場合は `discussions/` に記録を残すこと（→ .cursor/rules/discussion-workflow.mdc）。

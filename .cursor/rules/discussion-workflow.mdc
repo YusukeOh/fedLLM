@@ -1,0 +1,18 @@
+---
+description: 議論のアーカイブ手順（discussions/ディレクトリの運用ルール）
+alwaysApply: true
+---
+
+# 議論管理ワークフロー
+
+## セッション開始時
+
+作業開始時に `discussions/decisions.md` を読み、プロジェクトの現在の方針を把握する。
+
+## 「アーカイブして」と指示された場合
+
+ユーザーから「アーカイブして」等の指示を受けた場合、当該セッションの議論内容を以下の手順で記録する:
+
+1. `discussions/` を確認し、該当トピックのファイルがあれば「議論の経緯」セクションに日付付きで追記。なければ `discussions/_TEMPLATE.md` を元に `discussions/NNN_topic_name.md` を新規作成（NNNは連番）
+2. 結論が変わった場合は、議論ファイルの「結論」「選択肢の比較」セクションも現在の結論に更新する（旧結論は「議論の経緯」に残っているので上書きしてよい）
+3. `discussions/decisions.md` の該当エントリを更新する（既存エントリの改訂。新規決定の場合は追加）。`.cursor/rules/project-context.mdc` にも反映する
