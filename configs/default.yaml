@@ -21,7 +21,7 @@ data:
     labor:               # 労働市場 (6)
       - PAYEMS              # Total Nonfarm Payrolls
       - UNRATE              # Unemployment Rate
-      - CES0600000007       # Avg Hourly Earnings (Goods)
+      - CES0600000008       # Avg Hourly Earnings: Goods-Producing
       - CLAIMSx             # Initial Unemployment Claims
       - CLF16OV             # Civilian Labor Force
       - AWHMAN              # Avg Weekly Hours: Manufacturing
@@ -54,6 +54,58 @@ data:
   # Fallback mapping for series with early data gaps
   fallback_variables:
     ANDENOx: AMDMNOx     # Durable Goods New Orders (broader)
+
+# DEC-005: Preprocessing pipeline (discussions/003_preprocessing_pipeline.md)
+preprocessing:
+  start_date: "1978-02"            # all 29 core vars structurally complete
+  end_date: auto                   # no truncation; trailing NaN → [UNPUB]
+  pre_transform_imputation:
+    method: linear
+    scope: internal_only           # trailing NaN preserved for [UNPUB]
+  tcode: fred_md_official
+  tcode_override: {}               # ablation: e.g. {HOUST: 5, PERMIT: 5}
+  outlier:
+    method: winsorize
+    threshold: 10                  # × IQR from median
+  normalization: standard_scaler   # fit on training set; RevIN applied in model
+  unpub_token:
+    enabled: true
+    training_simulation:
+      enabled: true
+      probability: 0.3
+    publication_lags:
+      tier_0:  # same-month or near-real-time
+        - FEDFUNDS
+        - GS10
+        - BAA
+        - "S&P 500"
+        - INDPRO
+        - CUMFNS
+        - PAYEMS
+        - UNRATE
+        - CES0600000008
+        - CLAIMSx
+        - CLF16OV
+        - AWHMAN
+        - CPIAUCSL
+        - CPIULFSL
+        - OILPRICEx
+        - WPSFD49207
+        - TWEXAFEGSMTHx
+        - M2SL
+        - BUSLOANS
+        - UMCSENTx
+      tier_1:  # ~1 month lag
+        - DPCERA3M086SBEA
+        - W875RX1
+        - PCEPI
+        - DSERRG3M086SBEA
+        - ANDENOx
+      tier_2:  # ~2 month lag
+        - CMRMTSPLx
+        - HOUST
+        - PERMIT
+        - ISRATIOx
 
 model:
   name: FedTimeLLM

@@ -177,6 +177,7 @@ FRED-MDの67年間を通史的に精査。FOMC議事録（初期は"Record of Po
 - [x] `src/data/fred_md.py` の `FREDMDDataset` に系列フィルタリングロジックを実装
 - [x] データ可用性の検証: TWEXAFEGSMTHx (20.8% NA), UMCSENTx (28.3% NA), ANDENOx (13.6% NA) → `keep_columns` パラメータで保護し `ffill/bfill` で補完。全29変数利用可能を確認
 - [x] `data/prompt_bank/fred_md.txt` のプロンプト記述を29系列に合わせて更新
+- [x] CES0600000007→CES0600000008 差替えをconfigs/fred_md.pyに反映（2026-02-18）
 - [ ] コア(29変数) vs フル(128変数) のアブレーション実験設計
 - [ ] VIXCLSx の将来的追加を検討（FOMC声明文の利用可能期間[1994年〜]にサンプルを限定する場合、データ欠損の問題が解消）
 

@@ -81,6 +81,15 @@ McCracken & Ng (2016) のNaN置換→補間方式ではなく、**Winsorization�
 
 前処理パイプラインはCI/CD両対応の有効性マスクを提供する設計とした。
 
+### 2026-02-18: 設計のコード実装
+
+DEC-005/006/007の設計をコードに反映:
+
+- `src/data/fred_md.py`: `load_fred_md()` に `interpolate_internal_nans()`（変換前線形補間）、`winsorize()`（median±10×IQR）、`generate_publication_mask()`（公表ステータスマスク）、`start_date` パラメータを追加。`FREDMDDataset` がデフォルトで `start_date="1978-02"`, `winsorize_k=10.0` を使用
+- `configs/default.yaml`: preprocessingセクションに始期、Winsorization閾値、公表ラグtier（tier_0/1/2）を定義
+- CES0600000007→CES0600000008の差替えをconfigs/fred_md.py両方に反映
+- 動作確認: 575ヶ月×29変数、全変数NA率0%
+
 ## 確定した前処理パイプライン
 
 ```

@@ -90,10 +90,10 @@ def fetch_meeting_urls(
 
     entries: list[dict] = []
 
-    # 2015+ shares one calendar page; fetch it once
+    # Historical pages exist per-year up to 2020; 2021+ is on the shared calendar page
     seen_urls: set[str] = set()
     for year in range(start_year, end_year + 1):
-        if year >= 2015:
+        if year >= 2021:
             url = f"{FRB_BASE}/monetarypolicy/fomccalendars.htm"
         else:
             url = f"{FRB_BASE}/monetarypolicy/fomchistorical{year}.htm"
@@ -113,7 +113,7 @@ def fetch_meeting_urls(
         soup = BeautifulSoup(resp.text, "html.parser")
         page_entries = _parse_calendar_page(soup, year)
         # For the shared calendar page, filter to the requested year range
-        if year >= 2015:
+        if year >= 2021:
             page_entries = [
                 e for e in page_entries
                 if start_year <= e["meeting_date"].year <= end_year
@@ -278,9 +278,9 @@ def collect_fomc_documents(
 
     for meeting in meetings:
         for doc_type in doc_types:
-            url_key = f"{doc_type[:-1] if doc_type == 'minutes' else doc_type}_url"
-            # Normalize key names
-            if doc_type == "statement":
+            # Normalize: accept both "statement"/"statements" and "minute"/"minutes"
+            is_statement = doc_type.rstrip("s") == "statement"
+            if is_statement:
                 url = meeting.get("statement_url")
                 sub_dir = "statements"
             else:
@@ -291,9 +291,9 @@ def collect_fomc_documents(
                 continue
 
             doc = FOMCDocument(
-                doc_type=doc_type.rstrip("s"),  # "statement" or "minute"
+                doc_type="statement" if is_statement else "minute",
                 meeting_date=meeting["meeting_date"],
-                release_date=meeting["meeting_date"],  # refined in post-processing
+                release_date=meeting["meeting_date"],
                 url=url,
             )
 

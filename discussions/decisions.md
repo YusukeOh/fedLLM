@@ -107,3 +107,23 @@
 - **根拠**: Step 1b（FOMC声明文PaP）はlook-aheadリスクが高い。Step 2（Fed語彙Reprogramming）はリスクが低い（語彙埋込みは時代不変の概念）。look-aheadの定量的分離自体を方法論的貢献として位置づけ
 - **詳細**: [004_pap_design_and_lookahead.md](004_pap_design_and_lookahead.md)
 - **チャット参照**: [PaP再設計とlook-ahead対策](fec25999-527e-411c-878c-c73f665ac98b)
+
+## DEC-009: フェーズ1の完了とフェーズ2移行
+
+- **日付**: 2026-02-18
+- **ステータス**: confirmed
+- **決定内容**: フェーズ1（データ収集・前処理）の全タスクを完了とし、フェーズ2（Step 1: Prompt-as-Prefix実験）に移行する
+- **成果物**:
+  - **FRED-MD前処理パイプライン**: `src/data/fred_md.py` — 変換前線形補間→tcode変換→始期1978-02→Winsorization(10×IQR)→StandardScaler→公表マスク生成。575ヶ月×29変数で動作確認済み
+  - **変数差替え**: CES0600000007→CES0600000008（configs/default.yaml, src/data/fred_md.py）
+  - **FOMC文書収集**: 244声明文＋308議事録（1993–2025）→ `data/raw/fomc/`
+  - **Fed語彙辞書**: GPT-2トークナイザーで5,000トークン → `data/vocabulary/fed_vocab_gpt2.json`
+  - **Domain-Anchored PaP**: 29変数プロンプト辞書 `src/data/prompt_dictionary.py`、`model.py` の `forecast()` をper-variable prompt生成に改修
+  - **時間軸アライメント**: `src/data/temporal_alignment.py`
+  - **前処理設定**: `configs/default.yaml` にpreprocessingセクション追加（始期、Winsorization、公表ラグtier等）
+- **フェーズ2の実装予定**:
+  - Step 1a: Domain-Anchored PaPでのベースライン学習・評価
+  - Step 1b: FOMC声明文をPaPに追加した実験
+  - [UNPUB]トークンの `layers.py` 実装（DEC-006）
+  - look-ahead統制実験の設計（DEC-008）
+- **チャット参照**: [フェーズ1完了・コード実装](THIS_SESSION)

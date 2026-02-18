@@ -68,6 +68,12 @@ FOMC声明文自体も時期を暗黙的に特定しうる（例: 特定のFF金
 
 提案書・実装計画にlook-ahead統制実験（時間的シャッフル検定、LLM打ち切り日テスト、GPT-2バックボーン検証）を追加。look-aheadの定量的分離を第3の方法論的貢献として位置づけ。
 
+### 2026-02-18: Domain-Anchored PaPのコード実装
+
+- `src/data/prompt_dictionary.py` を新規作成。29変数すべてに変数名・経済的役割・変換の経済学的意味を定義（`VARIABLE_PROMPTS` 辞書）。`TCODE_DESCRIPTIONS` でtcode→自然言語マッピング。`build_domain_anchored_prompt()` でper-variableプロンプト文字列を生成
+- `src/models/time_llm/model.py`: `forecast()` の統計ベースPaP（min/max/median/trend/lags）をDomain-Anchored PaPに置換。`column_names` を受け取り、バッチ内の各変数に固有プロンプトを生成。トークン数 60–80 → 推定25–35に削減
+- 動作確認: 29変数すべてにプロンプトが生成されることを検証
+
 ## 結論
 
 ### PaP設計
@@ -85,8 +91,8 @@ FOMC声明文自体も時期を暗黙的に特定しうる（例: 特定のFF金
 
 ## 残課題・今後の検討事項
 
-- [ ] 29変数のプロンプト辞書（変数名・経済的役割・変換意味）の具体的定義
-- [ ] model.py のPaPモジュール改修
+- [x] 29変数のプロンプト辞書（変数名・経済的役割・変換意味）の具体的定義 → `src/data/prompt_dictionary.py`
+- [x] model.py のPaPモジュール改修 → `forecast()` をDomain-Anchored PaPに置換。per-variable prompt生成
 - [ ] look-ahead統制実験の実装（フェーズ4）
 
 ## 参考資料

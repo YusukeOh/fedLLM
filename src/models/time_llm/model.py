@@ -26,6 +26,7 @@ from src.models.time_llm.layers import (
     PatchEmbedding,
     ReprogrammingLayer,
 )
+from src.data.prompt_dictionary import build_domain_anchored_prompt
 
 transformers.logging.set_verbosity_error()
 
@@ -81,7 +82,7 @@ FRED_MD_DESCRIPTION = (
     "It covers output, income, employment, housing, consumption, money, "
     "interest rates, prices, and stock markets. "
     "All series are transformed to stationarity following McCracken & Ng (2016)."
-)
+)  # Legacy; Domain-Anchored PaP (DEC-007) replaces this in per-variable prompts.
 
 
 class FedTimeLLM(nn.Module):
@@ -122,6 +123,8 @@ class FedTimeLLM(nn.Module):
             p.requires_grad = False
 
         self.description: str = config.get("description", FRED_MD_DESCRIPTION)
+        # DEC-007: Domain-Anchored PaP — variable names enable per-channel prompts
+        self.column_names: list[str] = config.get("column_names", [])
 
         self.patch_embedding = PatchEmbedding(self.d_model, self.patch_len, self.stride, self.dropout)
 
@@ -151,26 +154,14 @@ class FedTimeLLM(nn.Module):
         B, T, N = x_enc.size()
         x_enc = x_enc.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
 
-        min_vals = torch.min(x_enc, dim=1)[0]
-        max_vals = torch.max(x_enc, dim=1)[0]
-        medians = torch.median(x_enc, dim=1).values
-        lags = self._compute_lags(x_enc)
-        trends = x_enc.diff(dim=1).sum(dim=1)
-
+        # DEC-007: Domain-Anchored PaP — per-variable prompts
         prompts = []
-        for b in range(x_enc.shape[0]):
-            prompt = (
-                f"<|start_prompt|>Dataset description: {self.description}"
-                f"Task description: forecast the next {self.pred_len} months "
-                f"given the previous {self.seq_len} months of macroeconomic data; "
-                f"Input statistics: "
-                f"min value {min_vals[b].item():.4f}, "
-                f"max value {max_vals[b].item():.4f}, "
-                f"median value {medians[b].item():.4f}, "
-                f"the trend is {'upward' if trends[b] > 0 else 'downward'}, "
-                f"top 5 lags are: {lags[b].tolist()}<|<end_prompt>|>"
-            )
-            prompts.append(prompt)
+        for b_idx in range(B):
+            for var_idx in range(N):
+                var_id = self.column_names[var_idx] if var_idx < len(self.column_names) else ""
+                prompts.append(
+                    build_domain_anchored_prompt(var_id, self.pred_len, self.seq_len)
+                )
 
         x_enc = x_enc.reshape(B, N, T).permute(0, 2, 1).contiguous()
 

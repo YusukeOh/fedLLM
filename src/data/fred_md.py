@@ -53,34 +53,92 @@ def apply_transformations(df: pd.DataFrame, tcodes: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(cols, index=df.index)
 
 
+def interpolate_internal_nans(df: pd.DataFrame) -> pd.DataFrame:
+    """Linearly interpolate *internal* NaN gaps in raw data (pre-transform).
+
+    DEC-005: Prevents NaN propagation during tcode transformation (e.g. a
+    single NaN in tcode=6 would expand to 3 NaN rows).  Trailing NaNs
+    (jagged edges from publication lags) are preserved intentionally for
+    the [UNPUB] token mechanism (DEC-006).
+    """
+    result = df.copy()
+    for col in result.columns:
+        s = result[col]
+        first_valid = s.first_valid_index()
+        last_valid = s.last_valid_index()
+        if first_valid is None or last_valid is None:
+            continue
+        mask = (s.index >= first_valid) & (s.index <= last_valid)
+        result.loc[mask, col] = s.loc[mask].interpolate(method="linear")
+    return result
+
+
+def winsorize(df: pd.DataFrame, k: float = 10.0) -> pd.DataFrame:
+    """Winsorize each column at median ± k × IQR.
+
+    DEC-005: Preserves direction and timing of extreme events (e.g.
+    Volcker-era FEDFUNDS) while preventing StandardScaler distortion.
+    """
+    result = df.copy()
+    for col in result.columns:
+        s = result[col].dropna()
+        if len(s) == 0:
+            continue
+        q25 = s.quantile(0.25)
+        q75 = s.quantile(0.75)
+        iqr = q75 - q25
+        median = s.median()
+        lower = median - k * iqr
+        upper = median + k * iqr
+        result[col] = result[col].clip(lower=lower, upper=upper)
+    return result
+
+
+def generate_publication_mask(df: pd.DataFrame) -> pd.DataFrame:
+    """Generate a boolean mask: True where data is published, False where NaN.
+
+    DEC-006: The [UNPUB] token mechanism in PatchEmbedding uses this mask
+    to replace unpublished patches with a learnable embedding.
+    """
+    return ~df.isna()
+
+
 def load_fred_md(
     path: str | Path | None = None,
     url: str = FRED_MD_URL,
     transform: bool = True,
     drop_na_threshold: float = 0.1,
     keep_columns: list[str] | None = None,
+    start_date: str | None = None,
+    pre_transform_interpolate: bool = True,
+    winsorize_k: float | None = 10.0,
+    preserve_trailing_nans: bool = False,
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Load FRED-MD CSV and return (data, tcodes).
+    """Load and preprocess FRED-MD CSV following the DEC-005 pipeline.
+
+    Pipeline order:
+      1a. Pre-transform linear interpolation (internal NaN only)
+      1b. tcode transformation (McCracken & Ng stationarity codes)
+      2.  Start-date filter (default: 1978-02, all 29 core vars available)
+      3.  Winsorization (median ± k×IQR)
+      4.  Column filtering (drop_na_threshold + keep_columns)
+      5.  Remaining gap fill (ffill/bfill) — trailing NaNs optionally preserved
 
     Parameters
     ----------
-    path : str or Path, optional
-        Local CSV path.  Downloaded from *url* when absent.
-    url : str
-        Remote URL (default: current vintage on FRED website).
-    transform : bool
-        Whether to apply tcode transformations.
-    drop_na_threshold : float
-        Drop columns whose missing fraction exceeds this value.
-    keep_columns : list[str], optional
-        Columns to keep regardless of missing-value threshold.
+    path, url : CSV source.
+    transform : Apply tcode transformations.
+    drop_na_threshold : Drop columns exceeding this NA fraction.
+    keep_columns : Columns to keep regardless of NA threshold.
+    start_date : Trim data to start from this date (e.g. "1978-02").
+    pre_transform_interpolate : Interpolate internal NaN gaps before tcode.
+    winsorize_k : Winsorization threshold in IQR multiples (None to skip).
+    preserve_trailing_nans : If True, keep trailing NaN for [UNPUB] mask.
 
     Returns
     -------
     data : pd.DataFrame
-        (T, N) panel with datetime index.
     tcodes : pd.Series
-        Transformation code per column (before any column drops).
     """
     if path is not None and os.path.exists(path):
         raw = pd.read_csv(path)
@@ -97,7 +155,6 @@ def load_fred_md(
         )
         raw = pd.read_csv(path)
 
-    # Row 0 after header contains transformation codes
     tcode_row = raw.iloc[0, 1:]
     tcodes = tcode_row.astype(float).astype(int)
 
@@ -107,11 +164,24 @@ def load_fred_md(
     data = data.set_index("date")
     data = data.apply(pd.to_numeric, errors="coerce")
 
+    # Step 1a: pre-transform interpolation (internal NaN only)
+    if pre_transform_interpolate and transform:
+        data = interpolate_internal_nans(data)
+
+    # Step 1b: tcode transformation
     if transform:
         data = apply_transformations(data, tcodes)
         data = data.iloc[2:]  # drop rows lost to differencing
 
-    # Drop columns with excessive missingness (but preserve keep_columns)
+    # Step 2: start-date filter
+    if start_date is not None:
+        data = data.loc[start_date:]
+
+    # Step 3: Winsorization
+    if winsorize_k is not None:
+        data = winsorize(data, k=winsorize_k)
+
+    # Step 4: column filtering
     missing_frac = data.isna().mean()
     keep = missing_frac[missing_frac <= drop_na_threshold].index.tolist()
     if keep_columns:
@@ -120,8 +190,16 @@ def load_fred_md(
                 keep.append(col)
     data = data[keep]
 
-    # Forward-fill then back-fill remaining small gaps
-    data = data.ffill().bfill()
+    # Step 5: fill remaining gaps (preserve trailing NaN if requested)
+    if preserve_trailing_nans:
+        for col in data.columns:
+            s = data[col]
+            last_valid = s.last_valid_index()
+            if last_valid is not None:
+                internal = s.loc[:last_valid]
+                data.loc[:last_valid, col] = internal.ffill().bfill()
+    else:
+        data = data.ffill().bfill()
 
     return data, tcodes
 
@@ -138,7 +216,7 @@ CORE_VARIABLES: dict[str, dict] = {
     # Labor market (6)
     "PAYEMS":            {"name": "Total Nonfarm Payrolls",                  "category": "labor",        "tcode": 5},
     "UNRATE":            {"name": "Unemployment Rate",                       "category": "labor",        "tcode": 2},
-    "CES0600000007":     {"name": "Avg Hourly Earnings (Goods)",             "category": "labor",        "tcode": 1},
+    "CES0600000008":     {"name": "Avg Hourly Earnings: Goods-Producing",    "category": "labor",        "tcode": 6},
     "CLAIMSx":           {"name": "Initial Unemployment Claims",             "category": "labor",        "tcode": 5},
     "CLF16OV":           {"name": "Civilian Labor Force",                    "category": "labor",        "tcode": 5},
     "AWHMAN":            {"name": "Avg Weekly Hours: Manufacturing",         "category": "labor",        "tcode": 1},
@@ -254,6 +332,8 @@ class FREDMDDataset(Dataset):
         freq: str = "m",
         percent: int = 100,
         use_core_variables: bool = True,
+        start_date: str = "1978-02",
+        winsorize_k: float = 10.0,
         **kwargs,
     ):
         if size is None:
@@ -276,6 +356,8 @@ class FREDMDDataset(Dataset):
         self.percent = percent
         self.root_path = root_path
         self.use_core_variables = use_core_variables
+        self.start_date = start_date
+        self.winsorize_k = winsorize_k
 
         self._read_data()
 
@@ -287,7 +369,14 @@ class FREDMDDataset(Dataset):
     def _read_data(self):
         csv_path = os.path.join(self.root_path, "fred_md.csv")
         core_ids = get_core_variable_ids() if self.use_core_variables else None
-        data, _ = load_fred_md(path=csv_path, transform=True, keep_columns=core_ids)
+        data, _ = load_fred_md(
+            path=csv_path,
+            transform=True,
+            keep_columns=core_ids,
+            start_date=self.start_date,
+            winsorize_k=self.winsorize_k,
+            preserve_trailing_nans=False,
+        )
 
         if self.use_core_variables:
             available_ids, _ = validate_data_availability(
@@ -295,13 +384,15 @@ class FREDMDDataset(Dataset):
             )
             data = data[[c for c in available_ids if c in data.columns]]
 
+        # Generate and store publication mask before filling NaN
+        self.pub_mask = generate_publication_mask(data)
+
         if self.target not in data.columns:
-            core_ids = get_core_variable_ids() if self.use_core_variables else list(TARGET_VARIABLES.keys())
-            available = [c for c in core_ids if c in data.columns]
+            candidate_ids = get_core_variable_ids() if self.use_core_variables else list(TARGET_VARIABLES.keys())
+            available = [c for c in candidate_ids if c in data.columns]
             if available:
                 self.target = available[0]
 
-        # Reorder so target column is last (Time-LLM convention)
         cols = [c for c in data.columns if c != self.target] + [self.target]
         data = data[cols]
 
