@@ -19,6 +19,11 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 
+# Checkpoints / model weights
+checkpoints/
+*.pt
+*.pth
+
 # Temporary files
 *.tmp
 *.log

@@ -311,13 +311,13 @@ def validate_data_availability(
 class FREDMDDataset(Dataset):
     """PyTorch Dataset wrapping FRED-MD for Time-LLM style forecasting.
 
-    The interface mirrors Time-LLM's ``Dataset_Custom`` so it can be used as a
-    drop-in replacement in the training loop.
+    Returns multivariate windows so that Time-LLM's channel-independent (CI)
+    architecture can generate per-variable prompts via column_names.
 
     Each sample returns:
-        seq_x   : (seq_len, 1)       input window for one variable
-        seq_y   : (label_len + pred_len, 1)  target window
-        seq_x_mark : (seq_len, 1)    month index  [0..11]
+        seq_x      : (seq_len, N_vars)
+        seq_y      : (label_len + pred_len, N_vars)
+        seq_x_mark : (seq_len, 1)           month index [0..11]
         seq_y_mark : (label_len + pred_len, 1)
     """
 
@@ -384,7 +384,6 @@ class FREDMDDataset(Dataset):
             )
             data = data[[c for c in available_ids if c in data.columns]]
 
-        # Generate and store publication mask before filling NaN
         self.pub_mask = generate_publication_mask(data)
 
         if self.target not in data.columns:
@@ -425,7 +424,6 @@ class FREDMDDataset(Dataset):
         else:
             values = df_data.values
 
-        # Month-of-year as the only time feature for monthly data
         dates = data.index[border1:border2]
         self.data_stamp = np.array([[d.month - 1] for d in dates], dtype=np.float32)
 
@@ -437,15 +435,13 @@ class FREDMDDataset(Dataset):
     # ── Dataset interface ───────────────────────────────────────
 
     def __getitem__(self, index):
-        feat_id = index // self.tot_len
-        s_begin = index % self.tot_len
-
+        s_begin = index
         s_end = s_begin + self.seq_len
         r_begin = s_end - self.label_len
         r_end = r_begin + self.label_len + self.pred_len
 
-        seq_x = self.data_x[s_begin:s_end, feat_id : feat_id + 1]
-        seq_y = self.data_y[r_begin:r_end, feat_id : feat_id + 1]
+        seq_x = self.data_x[s_begin:s_end]           # (seq_len, N_vars)
+        seq_y = self.data_y[r_begin:r_end]            # (label_len + pred_len, N_vars)
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
@@ -457,7 +453,7 @@ class FREDMDDataset(Dataset):
         )
 
     def __len__(self):
-        return self.tot_len * self.enc_in
+        return self.tot_len
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)

@@ -65,20 +65,22 @@ class ReplicationPad1d(nn.Module):
 
 
 class PatchEmbedding(nn.Module):
-    """Split a univariate time series into patches and project to d_model."""
+    """Split a univariate time series into patches and project to d_model.
+
+    Matches the original Time-LLM (Jin et al., 2024): patches of length
+    patch_len are linearly projected to d_model.
+    """
 
     def __init__(self, d_model: int, patch_len: int, stride: int, dropout: float):
         super().__init__()
         self.patch_len = patch_len
         self.stride = stride
         self.padding_layer = ReplicationPad1d((0, stride))
-        self.value_embedding = nn.Sequential(
-            nn.Conv1d(patch_len, d_model, kernel_size=3, padding=1, padding_mode="circular", bias=False),
-        )
+        self.value_embedding = nn.Linear(patch_len, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: Tensor) -> tuple[Tensor, int]:
-        # x: (B, N, T) → patches: (B*N, n_patches, patch_len)
+        # x: (B, N, T) → (B*N, n_patches, d_model)
         n_vars = x.shape[1]
         x = self.padding_layer(x)
         x = x.unfold(dimension=-1, size=self.patch_len, step=self.stride)

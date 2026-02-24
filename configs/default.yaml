@@ -133,6 +133,8 @@ training:
   patience: 10           # early stopping patience
   lr_scheduler: cosine   # cosine | onecycle
   use_amp: true
+  gpu: auto              # auto | 0 | 1 | 0,1
+                         # auto: llm_layers<=6 → cuda:0, >6 → DataParallel(0,1)
 
 evaluation:
   pred_horizons:

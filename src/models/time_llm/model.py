@@ -123,7 +123,6 @@ class FedTimeLLM(nn.Module):
             p.requires_grad = False
 
         self.description: str = config.get("description", FRED_MD_DESCRIPTION)
-        # DEC-007: Domain-Anchored PaP — variable names enable per-channel prompts
         self.column_names: list[str] = config.get("column_names", [])
 
         self.patch_embedding = PatchEmbedding(self.d_model, self.patch_len, self.stride, self.dropout)
@@ -144,7 +143,35 @@ class FedTimeLLM(nn.Module):
         )
         self.normalize_layers = Normalize(self.enc_in, affine=False)
 
+        self._prompt_cache: torch.Tensor | None = None
+
     # ── forward ────────────────────────────────────────────────
+
+    def _get_prompt_embeddings(self, device: torch.device) -> torch.Tensor:
+        """Return cached (N, prompt_len, d_llm) prompt embeddings.
+
+        Prompts depend only on column_names, pred_len, seq_len — all constant
+        across batches — so we tokenize and embed once, then expand per batch.
+        """
+        if self._prompt_cache is not None and self._prompt_cache.device == device:
+            return self._prompt_cache
+
+        N = len(self.column_names) or self.enc_in
+        prompts = [
+            build_domain_anchored_prompt(
+                self.column_names[i] if i < len(self.column_names) else "",
+                self.pred_len,
+                self.seq_len,
+            )
+            for i in range(N)
+        ]
+        ids = self.tokenizer(
+            prompts, return_tensors="pt", padding=True, truncation=True, max_length=2048
+        ).input_ids
+        with torch.no_grad():
+            emb = self.llm_model.get_input_embeddings()(ids.to(device))
+        self._prompt_cache = emb
+        return emb
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
         return self.forecast(x_enc, x_mark_enc)[:, -self.pred_len :, :]
@@ -152,35 +179,24 @@ class FedTimeLLM(nn.Module):
     def forecast(self, x_enc: torch.Tensor, x_mark_enc: torch.Tensor):
         x_enc = self.normalize_layers(x_enc, "norm")
         B, T, N = x_enc.size()
-        x_enc = x_enc.permute(0, 2, 1).contiguous().reshape(B * N, T, 1)
 
-        # DEC-007: Domain-Anchored PaP — per-variable prompts
-        prompts = []
-        for b_idx in range(B):
-            for var_idx in range(N):
-                var_id = self.column_names[var_idx] if var_idx < len(self.column_names) else ""
-                prompts.append(
-                    build_domain_anchored_prompt(var_id, self.pred_len, self.seq_len)
-                )
-
-        x_enc = x_enc.reshape(B, N, T).permute(0, 2, 1).contiguous()
-
-        prompt_ids = self.tokenizer(
-            prompts, return_tensors="pt", padding=True, truncation=True, max_length=2048
-        ).input_ids
-        prompt_emb = self.llm_model.get_input_embeddings()(prompt_ids.to(x_enc.device))
+        # (N, prompt_len, d_llm) → (B*N, prompt_len, d_llm)
+        prompt_emb_n = self._get_prompt_embeddings(x_enc.device)
+        prompt_emb = prompt_emb_n.unsqueeze(0).expand(B, -1, -1, -1)
+        prompt_emb = prompt_emb.reshape(B * N, prompt_emb_n.shape[1], -1)
 
         source_emb = self.mapping_layer(self.word_embeddings.permute(1, 0)).permute(1, 0)
 
+        # (B, T, N) → (B, N, T) for PatchEmbedding
         x_enc = x_enc.permute(0, 2, 1).contiguous()
-        enc_out, n_vars = self.patch_embedding(x_enc.to(torch.bfloat16))
+        enc_out, n_vars = self.patch_embedding(x_enc)
         enc_out = self.reprogramming_layer(enc_out, source_emb, source_emb)
 
         llm_input = torch.cat([prompt_emb, enc_out], dim=1)
         dec_out = self.llm_model(inputs_embeds=llm_input).last_hidden_state
         dec_out = dec_out[:, :, : self.d_ff]
 
-        dec_out = dec_out.reshape(-1, n_vars, dec_out.shape[-2], dec_out.shape[-1])
+        dec_out = dec_out.reshape(B, n_vars, dec_out.shape[-2], dec_out.shape[-1])
         dec_out = dec_out.permute(0, 1, 3, 2).contiguous()
         dec_out = self.output_projection(dec_out[:, :, :, -self.patch_nums :])
         dec_out = dec_out.permute(0, 2, 1).contiguous()

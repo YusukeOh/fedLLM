@@ -10,15 +10,18 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import sys
 import time
+from datetime import datetime
 
 import numpy as np
 import torch
 import yaml
 from torch import nn, optim
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -45,11 +48,50 @@ def load_config(path: str, overrides: dict) -> dict:
     flat.update(cfg.get("model", {}))
     flat.update(cfg.get("training", {}))
 
+    preproc = cfg.get("preprocessing", {})
+    if preproc:
+        flat["start_date"] = preproc.get("start_date", "1978-02")
+        outlier = preproc.get("outlier", {})
+        if outlier.get("method") == "winsorize":
+            flat["winsorize_k"] = float(outlier.get("threshold", 10))
+
     for k, v in overrides.items():
         if v is not None:
             flat[k] = v
 
     return flat
+
+
+def resolve_device(cfg: dict) -> tuple[torch.device, list[int]]:
+    """Determine primary device and GPU list from config ``gpu`` field.
+
+    Returns
+    -------
+    device : primary torch.device (always the first GPU, or cpu)
+    gpu_ids : list of GPU ordinals to use (empty for cpu)
+    """
+    if not torch.cuda.is_available():
+        return torch.device("cpu"), []
+
+    gpu_cfg = str(cfg.get("gpu", "auto")).strip().lower()
+    n_gpus = torch.cuda.device_count()
+
+    if gpu_cfg == "auto":
+        llm_layers = cfg.get("llm_layers", 6)
+        if llm_layers > 6 and n_gpus >= 2:
+            gpu_ids = list(range(n_gpus))
+        else:
+            gpu_ids = [0]
+    elif gpu_cfg == "cpu":
+        return torch.device("cpu"), []
+    else:
+        gpu_ids = [int(x) for x in gpu_cfg.split(",")]
+        gpu_ids = [g for g in gpu_ids if g < n_gpus]
+        if not gpu_ids:
+            gpu_ids = [0]
+
+    device = torch.device(f"cuda:{gpu_ids[0]}")
+    return device, gpu_ids
 
 
 def build_dataloaders(cfg: dict):
@@ -59,6 +101,8 @@ def build_dataloaders(cfg: dict):
         target=cfg["target"],
         scale=cfg["scale"],
         freq=cfg["freq"],
+        start_date=cfg.get("start_date", "1978-02"),
+        winsorize_k=cfg.get("winsorize_k", 10.0),
     )
     size = [cfg["seq_len"], cfg["label_len"], cfg["pred_len"]]
 
@@ -67,6 +111,7 @@ def build_dataloaders(cfg: dict):
     test_ds = FREDMDDataset(flag="test", size=size, **common)
 
     cfg["enc_in"] = train_ds.enc_in
+    cfg["column_names"] = train_ds.column_names
 
     bs = cfg["batch_size"]
     train_dl = DataLoader(train_ds, batch_size=bs, shuffle=True, num_workers=4, drop_last=True)
@@ -76,7 +121,7 @@ def build_dataloaders(cfg: dict):
     return train_ds, val_ds, test_ds, train_dl, val_dl, test_dl
 
 
-def evaluate(model, dataloader, criterion, device):
+def evaluate(model, dataloader, criterion, device, use_amp=False):
     model.eval()
     total_loss = []
     total_mae = []
@@ -90,12 +135,13 @@ def evaluate(model, dataloader, criterion, device):
 
             dec_inp = torch.zeros_like(batch_y[:, -batch_y.shape[1] :, :]).to(device)
 
-            outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-            pred_len = outputs.shape[1]
-            batch_y = batch_y[:, -pred_len:, :]
+            with autocast("cuda", enabled=use_amp):
+                outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                pred_len = outputs.shape[1]
+                batch_y = batch_y[:, -pred_len:, :]
+                loss = criterion(outputs, batch_y)
+                mae_loss = mae_fn(outputs, batch_y)
 
-            loss = criterion(outputs, batch_y)
-            mae_loss = mae_fn(outputs, batch_y)
             total_loss.append(loss.item())
             total_mae.append(mae_loss.item())
 
@@ -111,6 +157,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--gpu", type=str, default=None, help="auto | 0 | 1 | 0,1")
     args = parser.parse_args()
 
     overrides = {k: v for k, v in vars(args).items() if k != "config"}
@@ -118,8 +165,9 @@ def main():
 
     seed_everything(cfg.get("seed", 42))
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    device, gpu_ids = resolve_device(cfg)
+    use_dp = len(gpu_ids) > 1
+    print(f"Device: {device} | GPUs: {gpu_ids}{' (DataParallel)' if use_dp else ''}")
 
     print("Loading FRED-MD data ...")
     train_ds, val_ds, test_ds, train_dl, val_dl, test_dl = build_dataloaders(cfg)
@@ -128,14 +176,18 @@ def main():
 
     print("Building model ...")
     model = FedTimeLLM(cfg).float().to(device)
+    if use_dp:
+        model = nn.DataParallel(model, device_ids=gpu_ids)
+        print(f"  Wrapped with DataParallel on GPUs {gpu_ids}")
 
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
+    raw_model = model.module if use_dp else model
+    trainable = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in raw_model.parameters())
     print(f"  Trainable parameters: {trainable:,} / {total:,}")
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(
-        [p for p in model.parameters() if p.requires_grad],
+        [p for p in raw_model.parameters() if p.requires_grad],
         lr=cfg["learning_rate"],
     )
 
@@ -150,14 +202,26 @@ def main():
             epochs=cfg["epochs"],
         )
 
-    ckpt_dir = os.path.join("checkpoints", f"fedtimellm_pred{cfg['pred_len']}")
+    use_amp = cfg.get("use_amp", False) and torch.cuda.is_available()
+    scaler = GradScaler(enabled=use_amp)
+
+    run_name = f"fedtimellm_pred{cfg['pred_len']}_{datetime.now():%Y%m%d_%H%M%S}"
+    ckpt_dir = os.path.join("checkpoints", run_name)
     os.makedirs(ckpt_dir, exist_ok=True)
+    log_dir = os.path.join("results", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    with open(os.path.join(ckpt_dir, "config.json"), "w") as f:
+        json.dump(cfg, f, indent=2, default=str)
 
     best_val_loss = float("inf")
     patience_counter = 0
     patience = cfg.get("patience", 10)
+    history: list[dict] = []
 
-    print("\n=== Training ===")
+    print(f"\n=== Training ({run_name}) ===")
+    gpu_desc = f"GPUs {gpu_ids} (DP)" if use_dp else f"GPU {gpu_ids[0]}" if gpu_ids else "CPU"
+    print(f"  {gpu_desc} | AMP: {use_amp} | Batch: {cfg['batch_size']} | LR: {cfg['learning_rate']}")
     for epoch in range(cfg["epochs"]):
         model.train()
         losses = []
@@ -174,20 +238,31 @@ def main():
             dec_inp = torch.zeros_like(batch_y[:, -batch_y.shape[1] :, :]).to(device)
 
             optimizer.zero_grad()
-            outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-            pred_len = outputs.shape[1]
-            loss = criterion(outputs, batch_y[:, -pred_len:, :])
-            loss.backward()
-            optimizer.step()
+            with autocast("cuda", enabled=use_amp):
+                outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                pred_len = outputs.shape[1]
+                loss = criterion(outputs, batch_y[:, -pred_len:, :])
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             losses.append(loss.item())
 
         if lr_sched == "cosine":
             scheduler.step()
 
         train_loss = np.mean(losses)
-        val_loss, val_mae = evaluate(model, val_dl, criterion, device)
-        test_loss, test_mae = evaluate(model, test_dl, criterion, device)
+        val_loss, val_mae = evaluate(model, val_dl, criterion, device, use_amp)
+        test_loss, test_mae = evaluate(model, test_dl, criterion, device, use_amp)
         elapsed = time.time() - t0
+
+        row = {
+            "epoch": epoch + 1, "train_mse": train_loss,
+            "val_mse": val_loss, "val_mae": val_mae,
+            "test_mse": test_loss, "test_mae": test_mae,
+            "elapsed_s": round(elapsed, 1),
+        }
+        history.append(row)
 
         print(
             f"Epoch {epoch + 1:3d} | "
@@ -198,7 +273,7 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(ckpt_dir, "best.pt"))
+            torch.save(raw_model.state_dict(), os.path.join(ckpt_dir, "best.pt"))
         else:
             patience_counter += 1
             if patience_counter >= patience:
@@ -206,9 +281,15 @@ def main():
                 break
 
     print("\n=== Final evaluation ===")
-    model.load_state_dict(torch.load(os.path.join(ckpt_dir, "best.pt"), weights_only=True))
-    test_loss, test_mae = evaluate(model, test_dl, criterion, device)
+    raw_model.load_state_dict(torch.load(os.path.join(ckpt_dir, "best.pt"), weights_only=True))
+    test_loss, test_mae = evaluate(model, test_dl, criterion, device, use_amp)
     print(f"Test MSE: {test_loss:.6f} | Test MAE: {test_mae:.6f}")
+
+    results = {"test_mse": test_loss, "test_mae": test_mae, "history": history}
+    results_path = os.path.join(ckpt_dir, "results.json")
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Results saved to {results_path}")
 
 
 if __name__ == "__main__":
