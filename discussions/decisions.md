@@ -127,3 +127,18 @@
   - [UNPUB]トークンの `layers.py` 実装（DEC-006）
   - look-ahead統制実験の設計（DEC-008）
 - **チャット参照**: [フェーズ1完了・コード実装](THIS_SESSION)
+
+## DEC-010: 解釈可能性とChannel Independenceを超える枠組み
+
+- **日付**: 2026-03-27
+- **ステータス**: tentative
+- **決定内容**: 現行の完全CI（Channel Independence）アーキテクチャでは、提案書RQ2の多変量ナラティブ（「需要過熱 vs 供給制約」等）が原理的に生成不可能であるため、Cross-Variable Attention層の導入を検討
+  - **暫定方針: 方向性1** — パッチレベルでのCross-Variable Attention → Reprogramming → LLMの順序。クロス変数の文脈を含むパッチが語彙空間に写像されることで、Reprogrammingアテンションが直接多変量ナラティブを表現
+  - 投射層（d_model=16 → d_crossvar=128）+ 残差接続で実装。追加パラメータ ~70K
+  - 凍結LLMのtransformer層はクロス変数インタラクションに寄与しない。LLMの役割は「テキスト情報と時系列情報を同一空間で処理するインターフェース」に限定される可能性
+- **根拠**:
+  - CIの下では各変数のReprogrammingアテンションが他変数の状態を参照できず、条件付きナラティブ生成が不可能
+  - 方向性2（Reprogramming後のCrossVar）は語彙多様体逸脱リスク・パラメータ非効率・ナラティブの間接性で劣後
+  - 凍結LLMの寄与はプロンプト言語理解・FOMC声明文処理に限定される可能性（Tan et al., 2024）。アブレーションで検証予定
+- **詳細**: [005_interpretability_and_cross_variable.md](005_interpretability_and_cross_variable.md)
+- **チャット参照**: [解釈可能性とCI超越](THIS_SESSION)
